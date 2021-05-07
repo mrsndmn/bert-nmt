@@ -1,2 +1,5 @@
 .data
 __pycache__
+Untitled*.ipynb
+.vscode
+.ipynb_checkpoints
