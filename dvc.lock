@@ -1,0 +1,13 @@
+schema: '2.0'
+stages:
+  train_tokenizer:
+    cmd: python train_tokenizer.py --tokenizer-out .data/wmt20.bpetokenizer --dataset
+      wmt20_mlqe_task1 --languages ru-en
+    deps:
+    - path: train_tokenizer.py
+      md5: f744e0d25ea1b92a4457d49bdea19fc4
+      size: 1334
+    outs:
+    - path: .data/wmt20.bpetokenizer
+      md5: e19dfb66cba6fd209f59ea9dccf70214
+      size: 898442
