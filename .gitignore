@@ -3,3 +3,4 @@ __pycache__
 Untitled*.ipynb
 .vscode
 .ipynb_checkpoints
+lightning_logs/
