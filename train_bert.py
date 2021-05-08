@@ -33,21 +33,22 @@ class BertModelInvertibleEmbeddings(BertModel):
 
     def get_raw_embeddings(self, batch: EncodingBatched):
 
-        layer_norm = self.embeddings.LayerNorm
+        with torch.no_grad():
+            layer_norm = self.embeddings.LayerNorm
 
-        self.embeddings.LayerNorm = DoNothing()
+            self.embeddings.LayerNorm = DoNothing()
 
-        was_dropout_trainig = self.embeddings.dropout.training
-        self.embeddings.dropout.eval()
-        tokens_embeddings = self.embeddings.forward(
-            input_ids=batch.tokens_ids,
-            token_type_ids=batch.special_tokens_masks
-        )
+            was_dropout_trainig = self.embeddings.training
+            self.embeddings.eval()
+            tokens_embeddings = self.embeddings.forward(
+                input_ids=batch.tokens_ids,
+                token_type_ids=batch.special_tokens_masks,
+            )
 
-        if was_dropout_trainig:
-            self.embeddings.dropout.train()
+            if was_dropout_trainig:
+                self.embeddings.train()
 
-        self.embeddings.LayerNorm = layer_norm
+            self.embeddings.LayerNorm = layer_norm
 
 
         return tokens_embeddings
@@ -103,6 +104,7 @@ class BertLightningModule(pl.LightningModule):
     all_hyperparameters_list = [
         "lr",
         "scheduler", "noam_opt_warmup_steps", "noam_step_factor", 'noam_scaler',
+        "emb_norm_reg"
     ]
 
     def __init__(self,
@@ -112,6 +114,7 @@ class BertLightningModule(pl.LightningModule):
         scheduler_patience:int=10,
         noam_step_factor: float = 1.,
         noam_scaler: float = 1.,
+        emb_norm_reg = 0.001,
         **kwargs,
     ):
 
@@ -165,7 +168,11 @@ class BertLightningModule(pl.LightningModule):
 
         loss = self.criterion( bertout.last_hidden_state, tokens_embeddings )
 
-        self.log( "l2_loss", loss.item() )
+        emb_norm = self.bertmodel.embeddings.word_embeddings.weight.pow(2).sum(dim=0).mean()
+        self.log( "emb_mean_norm", emb_norm.item(), prog_bar=True )
+        loss += self.hparams.emb_norm_reg * max((emb_norm - 12), 0)
+
+        self.log( "loss", loss.item() )
 
         opt = self.optimizers()
         self.log("lr", opt.param_groups[0]['lr'], prog_bar=True)
@@ -186,25 +193,23 @@ class BertLightningModule(pl.LightningModule):
 
         loss = self.criterion( bertout.last_hidden_state, tokens_embeddings )
 
-        self.log( "valid_l2_loss", loss.item() )
+        emb_norm = self.bertmodel.embeddings.word_embeddings.weight.pow(2).sum(dim=0).mean()
+        self.log( "emb_mean_norm", emb_norm.item(), prog_bar=True )
+        loss += self.hparams.emb_norm_reg * max((emb_norm - 11.97), 0)
 
-        decoded_tokens = self.bertmodel.tokens_from_words_embeddings(tokens_embeddings)
+        self.log( "valid_loss", loss.item() )
 
-        tokens_mismatched = (decoded_tokens != batch.tokens_ids).sum()
-        self.log( "tokens_mismatched", tokens_mismatched.item() )
-        tokens_mismatched_accuracy = 1 - tokens_mismatched / batch.tokens_ids.numel()
-        self.log( "tokens_mismatched_accuracy",  tokens_mismatched_accuracy.item() )
+        word_embeddings = self.bertmodel.word_embeddings_from_lhs(bertout.last_hidden_state)
+        decoded_tokens = self.bertmodel.tokens_from_words_embeddings(word_embeddings)
 
+        non_pad_elems = (batch.tokens_ids != 3)
+        tokens_matched = ((decoded_tokens == batch.tokens_ids) & non_pad_elems).sum()
+
+        self.log( "tokens_matched", tokens_matched.item() )
+        tokens_matched_accuracy = tokens_matched / non_pad_elems.sum().item()
+        self.log( "tokens_matched_accuracy",  tokens_matched_accuracy.item(), prog_bar=True )
 
         return
-
-    # def decode_embeddings(self, last_hidden_state: torch.Tensor):
-    #     # last_hidden_state # bs x seq_len x hidden_dim
-
-    #     self.bertmodel.embeddings
-
-
-
 
     # def validation_epoch_end(self, validation_step_outputs):
     #     generated = []
@@ -243,6 +248,7 @@ class BertLightningModule(pl.LightningModule):
         parser.add_argument("--scheduler_patience")
         parser.add_argument("--noam_step_factor", type=float)
         parser.add_argument("--noam_scaler", type=float)
+        parser.add_argument("--emb_norm_reg", type=float, default=0.001)
 
         return parser
 
@@ -281,7 +287,7 @@ def cli_main(args=None):
     parser.add_argument("--strict", default=False, action='store_true')
     parser.add_argument("--name", type=str, required=True)
 
-    parser.add_argument("--early_stopping_monitor", type=str, default='valid_l2_loss')
+    parser.add_argument("--early_stopping_monitor", type=str, default='valid_loss')
     parser.add_argument("--early_stopping_mode", type=str, default='min')
     parser.add_argument("--early_stopping_min_delta", type=float, default=0.001)
     parser.add_argument("--early_stopping_patience", type=int, default=3)
