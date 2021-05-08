@@ -157,14 +157,12 @@ class BertLightningModule(pl.LightningModule):
         # FixLM
 
         bertout: modeling_outputs.BaseModelOutputWithPoolingAndCrossAttentions = self.bertmodel.forward(
-            input_ids=batch.tokens_ids,
-            attention_mask=batch.attention_masks,
-            token_type_ids=batch.special_tokens_masks
+            input_ids=batch.src_encoding.tokens_ids,
+            attention_mask=batch.src_encoding.attention_masks,
+            token_type_ids=batch.src_encoding.special_tokens_masks
         )
 
-        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch)
-
-        assert bertout.last_hidden_state.size() == tokens_embeddings.size(), f"{bertout.last_hidden_state.size()} != {tokens_embeddings.size()}"
+        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch.trg_encoding)
 
         loss = self.criterion( bertout.last_hidden_state, tokens_embeddings )
 
@@ -182,14 +180,12 @@ class BertLightningModule(pl.LightningModule):
     def validation_step(self, batch: EncodingBatched, batch_idx: int):
 
         bertout: modeling_outputs.BaseModelOutputWithPoolingAndCrossAttentions = self.bertmodel.forward(
-            input_ids=batch.tokens_ids,
-            attention_mask=batch.attention_masks,
-            token_type_ids=batch.special_tokens_masks
+            input_ids=batch.src_encoding.tokens_ids,
+            attention_mask=batch.src_encoding.attention_masks,
+            token_type_ids=batch.src_encoding.special_tokens_masks
         )
 
-        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch)
-
-        assert bertout.last_hidden_state.size() == tokens_embeddings.size(), f"{bertout.last_hidden_state.size()} != {tokens_embeddings.size()}"
+        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch.trg_encoding)
 
         loss = self.criterion( bertout.last_hidden_state, tokens_embeddings )
 
@@ -202,8 +198,8 @@ class BertLightningModule(pl.LightningModule):
         word_embeddings = self.bertmodel.word_embeddings_from_lhs(bertout.last_hidden_state)
         decoded_tokens = self.bertmodel.tokens_from_words_embeddings(word_embeddings)
 
-        non_pad_elems = (batch.tokens_ids != 3)
-        tokens_matched = ((decoded_tokens == batch.tokens_ids) & non_pad_elems).sum()
+        non_pad_elems = (batch.trg_encoding.tokens_ids != 3)
+        tokens_matched = ((decoded_tokens == batch.trg_encoding.tokens_ids) & non_pad_elems).sum()
 
         self.log( "tokens_matched", tokens_matched.item() )
         tokens_matched_accuracy = tokens_matched / non_pad_elems.sum().item()
@@ -304,6 +300,9 @@ def cli_main(args=None):
     args = parser.parse_args(args)
 
     tokenizer = Tokenizer.from_file(args.tokenizer)
+    special_tokens = [ '[UNK]', '[PAD]', '[TRANSLATE]', '[ECHO]', '[MASK]', '[SEP]', ]
+    assert tokenizer.add_special_tokens(special_tokens) == 0, f'one of special tokens not in tokenizer: {special_tokens}'
+
     dm = dm_class.from_argparse_args(args, tokenizer=tokenizer, dataset=args.dataset, languages=args.languages, device='cuda')
     dm.setup()
 

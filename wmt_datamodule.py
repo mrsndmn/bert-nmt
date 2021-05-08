@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from datasets import load_dataset
 from tokenizers import Tokenizer
+from tokenizers.processors import TemplateProcessing
 
 import torch
 import pytorch_lightning as pl
@@ -93,6 +94,13 @@ class WMT20DataModule(pl.LightningDataModule):
         self.languages = languages
         self.tokenizer = tokenizer
         self.tokenizer.enable_padding(pad_id=3, pad_token="[PAD]")
+
+        translate_postprocessor = TemplateProcessing(
+            single="[TRANSLATE] $0 [SEP]",
+            special_tokens=[("[TRANSLATE]", tokenizer.token_to_id('[TRANSLATE]')), ("[SEP]", tokenizer.token_to_id('[SEP]'))],
+        )
+
+        tokenizer.post_processor = translate_postprocessor
 
         self.device = device
 

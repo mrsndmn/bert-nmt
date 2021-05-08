@@ -15,7 +15,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', help='datasets dataset name', type=str, required=True)
     parser.add_argument('--languages', help='dataset languages to tokenize', type=str, required=True)
     parser.add_argument('--tokenizer-out', help='tokenizer output file', type=str, required=True)
-    parser.add_argument('--special-tokens', type=str, default="[UNK],[CLS],[SEP],[PAD],[MASK]")
+    parser.add_argument('--special-tokens', type=str, default="[UNK],[SEP],[PAD],[MASK],[ECHO],[TRANSLATE]")
     args = parser.parse_args()
 
     translation_dataset = load_dataset(args.dataset, args.languages)
