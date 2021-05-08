@@ -31,7 +31,7 @@ class BertModelInvertibleEmbeddings(BertModel):
 
         return
 
-    def get_raw_embeddings(self, tokens_ids):
+    def get_raw_embeddings(self, batch: EncodingBatched):
 
         layer_norm = self.embeddings.LayerNorm
 
@@ -39,7 +39,10 @@ class BertModelInvertibleEmbeddings(BertModel):
 
         was_dropout_trainig = self.embeddings.dropout.training
         self.embeddings.dropout.eval()
-        tokens_embeddings = self.embeddings.forward(tokens_ids)
+        tokens_embeddings = self.embeddings.forward(
+            input_ids=batch.tokens_ids,
+            token_type_ids=batch.special_tokens_masks
+        )
 
         if was_dropout_trainig:
             self.embeddings.dropout.train()
@@ -75,7 +78,7 @@ class BertModelInvertibleEmbeddings(BertModel):
             # self.embeddings.word_embeddings.weight ~ [ vocab_size x hidden_dim ]
             # words_embeddings ~ [ batch_size, seq_len, hidden_dim ]
 
-            predicted_token_ids = torch.zeros( (words_embeddings.size(0), words_embeddings.size(1)), dtype=torch.long )
+            predicted_token_ids = torch.zeros( (words_embeddings.size(0), words_embeddings.size(1)), dtype=torch.long, device=words_embeddings.device )
 
             for batch_i in range(words_embeddings.size(0)):
                 for seq_len_i in range(words_embeddings.size(1)):
@@ -138,7 +141,7 @@ class BertLightningModule(pl.LightningModule):
 
         self.bertmodel = BertModelInvertibleEmbeddings(devbert_config)
 
-        self.criterion = nn.MSELoss()
+        self.criterion = nn.L1Loss()
 
         return
 
@@ -156,7 +159,7 @@ class BertLightningModule(pl.LightningModule):
             token_type_ids=batch.special_tokens_masks
         )
 
-        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch.tokens_ids)
+        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch)
 
         assert bertout.last_hidden_state.size() == tokens_embeddings.size(), f"{bertout.last_hidden_state.size()} != {tokens_embeddings.size()}"
 
@@ -177,7 +180,7 @@ class BertLightningModule(pl.LightningModule):
             token_type_ids=batch.special_tokens_masks
         )
 
-        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch.tokens_ids)
+        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch)
 
         assert bertout.last_hidden_state.size() == tokens_embeddings.size(), f"{bertout.last_hidden_state.size()} != {tokens_embeddings.size()}"
 
@@ -189,6 +192,9 @@ class BertLightningModule(pl.LightningModule):
 
         tokens_mismatched = (decoded_tokens != batch.tokens_ids).sum()
         self.log( "tokens_mismatched", tokens_mismatched.item() )
+        tokens_mismatched_accuracy = 1 - tokens_mismatched / batch.tokens_ids.numel()
+        self.log( "tokens_mismatched_accuracy",  tokens_mismatched_accuracy.item() )
+
 
         return
 
@@ -292,8 +298,10 @@ def cli_main(args=None):
     args = parser.parse_args(args)
 
     tokenizer = Tokenizer.from_file(args.tokenizer)
-    dm = dm_class.from_argparse_args(args, tokenizer=tokenizer, dataset=args.dataset, languages=args.languages, device='cuda' if args.gpus is not None and args.gpus > 0 else 'cpu')
+    dm = dm_class.from_argparse_args(args, tokenizer=tokenizer, dataset=args.dataset, languages=args.languages, device='cuda')
     dm.setup()
+
+    assert dm.device == 'cuda'
 
     if args.max_steps == -1:
         args.max_steps = None

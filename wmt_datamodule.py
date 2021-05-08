@@ -41,22 +41,19 @@ class EncodingBatched:
     def tokens_ids(self):
         token_ids = list( map(lambda x: x.ids, self.batch) )
         ret = torch.LongTensor(token_ids)
-        ret.to(self.device)
-        return ret
+        return ret.to(self.device)
 
     @functools.cached_property
     def attention_masks(self):
         attention_masks = list( map(lambda x: x.attention_mask, self.batch) )
         ret = torch.LongTensor(attention_masks)
-        ret.to(self.device)
-        return ret
+        return ret.to(self.device)
 
     @functools.cached_property
     def special_tokens_masks(self):
         special_tokens_masks = list( map(lambda x: x.special_tokens_mask, self.batch) )
         ret = torch.LongTensor(special_tokens_masks)
-        ret.to(self.device)
-        return ret
+        return ret.to(self.device)
 
     def halve(self) -> typing.Tuple[EncodingBatchedSubset, EncodingBatchedSubset]:
         batch_size = len(self.batch)
@@ -125,7 +122,7 @@ class WMT20DataModule(pl.LightningDataModule):
 
         encoded_batch = self.tokenizer.encode_batch( src_lang_sentences + trg_lang_sentences )
 
-        return EncodingBatched(encoded_batch)
+        return EncodingBatched(encoded_batch, device=self.device)
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(self.train, batch_size=self.batch_size, collate_fn=self.collate_fn, shuffle=True, num_workers=1)
