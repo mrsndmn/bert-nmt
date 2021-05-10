@@ -3,6 +3,7 @@ import typing
 from argparse import ArgumentParser
 import math
 from nltk.translate.bleu_score import corpus_bleu
+from copy import deepcopy
 
 import transformers.modeling_outputs as modeling_outputs
 from transformers.models.bert.modeling_bert import BertModel
@@ -29,6 +30,8 @@ class BertModelInvertibleEmbeddings(BertModel):
         self.encoder.layer[-1].output.dropout.p = 0
         self.encoder.layer[-1].output.LayerNorm = DoNothing()
 
+        self.encoder.layer[0].output.LayerNorm = DoNothing()
+
         return
 
     def get_raw_embeddings(self, batch: EncodingBatched):
@@ -39,8 +42,8 @@ class BertModelInvertibleEmbeddings(BertModel):
             self.embeddings.LayerNorm = DoNothing()
 
             was_dropout_trainig = self.embeddings.training
-            self.embeddings.eval()
-            tokens_embeddings = self.embeddings.forward(
+            eval_emb = self.embeddings.eval()
+            tokens_embeddings = eval_emb.forward(
                 input_ids=batch.tokens_ids,
                 token_type_ids=batch.special_tokens_masks,
             )
@@ -115,6 +118,7 @@ class BertLightningModule(pl.LightningModule):
         noam_step_factor: float = 1.,
         noam_scaler: float = 1.,
         emb_norm_reg = 0.001,
+        tokenizer: Tokenizer = None,
         **kwargs,
     ):
 
@@ -132,7 +136,7 @@ class BertLightningModule(pl.LightningModule):
             "model_type": "bert",
 
             "num_attention_heads": 8,
-            "num_hidden_layers": 2,
+            "num_hidden_layers": 3,
 
             "pad_token_id": 0,
 
@@ -142,9 +146,13 @@ class BertLightningModule(pl.LightningModule):
 
         self.save_hyperparameters( *self.all_hyperparameters_list )
 
-        self.bertmodel = BertModelInvertibleEmbeddings(devbert_config)
+        self.bertmodel = BertModelInvertibleEmbeddings(devbert_config, add_pooling_layer=False)
 
         self.criterion = nn.L1Loss()
+
+        self.tokenizer: Tokenizer = tokenizer
+
+        self.automatic_optimization = False
 
         return
 
@@ -156,21 +164,63 @@ class BertLightningModule(pl.LightningModule):
         # Translate
         # FixLM
 
-        bertout: modeling_outputs.BaseModelOutputWithPoolingAndCrossAttentions = self.bertmodel.forward(
-            input_ids=batch.src_encoding.tokens_ids,
-            attention_mask=batch.src_encoding.attention_masks,
-            token_type_ids=batch.src_encoding.special_tokens_masks
+        batch_echo = deepcopy(batch)
+        batch_echo.tokens_ids[:, 0] = self.tokenizer.token_to_id('[ECHO]')
+
+        tokens_to_mask = batch_echo.attention_masks & ( torch.randn(batch_echo.tokens_ids.size(), device=batch_echo.tokens_ids.device) > 0.9 )
+
+        mask_token_id = self.tokenizer.token_to_id('[MASK]')
+        batch_echo.tokens_ids[tokens_to_mask] = mask_token_id
+        batch_echo.special_tokens_masks[tokens_to_mask] = 1
+
+        mlm_bertout: modeling_outputs.BaseModelOutputWithPoolingAndCrossAttentions = self.bertmodel.forward(
+            input_ids=batch_echo.tokens_ids,
+            attention_mask=batch_echo.attention_masks,
+            token_type_ids=batch_echo.special_tokens_masks,
         )
 
-        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch.trg_encoding)
+        mlm_tokens_embeddings = self.bertmodel.get_raw_embeddings(batch_echo)
 
-        loss = self.criterion( bertout.last_hidden_state, tokens_embeddings )
+        # ignore pad index
+        pad_tokens_mask = (batch_echo.attention_masks == 0).unsqueeze(-1)
+        mlm_bertout.last_hidden_state.masked_fill_( pad_tokens_mask, 0 )
+        mlm_tokens_embeddings.masked_fill_( pad_tokens_mask, 0 )
 
-        emb_norm = self.bertmodel.embeddings.word_embeddings.weight.pow(2).sum(dim=0).mean()
-        self.log( "emb_mean_norm", emb_norm.item(), prog_bar=True )
-        loss += self.hparams.emb_norm_reg * max((emb_norm - 12), 0)
+        assert mlm_tokens_embeddings.requires_grad == False, 'no grad for mlm_tokens_embeddings.requires_grad'
 
-        self.log( "loss", loss.item() )
+        mlm_loss = self.criterion( mlm_bertout.last_hidden_state, mlm_tokens_embeddings )
+        mlm_loss = mlm_loss / (pad_tokens_mask.numel() - pad_tokens_mask.sum())
+
+        mlm_bertout = None
+        mlm_tokens_embeddings = None
+
+        # bertout: modeling_outputs.BaseModelOutputWithPoolingAndCrossAttentions = self.bertmodel.forward(
+        #     input_ids=batch.src_encoding.tokens_ids,
+        #     attention_mask=batch.src_encoding.attention_masks,
+        #     token_type_ids=batch.src_encoding.special_tokens_masks
+        # )
+
+        # tokens_embeddings = self.bertmodel.get_raw_embeddings(batch.trg_encoding)
+
+        # translate_pad_tokens_mask = (batch.trg_encoding.attention_masks == 0).unsqueeze(-1)
+        # bertout.last_hidden_state.masked_fill_( translate_pad_tokens_mask, 0 )
+        # tokens_embeddings.masked_fill_( translate_pad_tokens_mask, 0 )
+
+        translate_loss = torch.tensor(0.)
+        # translate_loss = self.criterion( bertout.last_hidden_state, tokens_embeddings )
+        # translate_loss = translate_loss / (translate_pad_tokens_mask.numel() - translate_pad_tokens_mask.sum())
+
+        # emb_norm = self.bertmodel.embeddings.word_embeddings.weight.pow(2).sum(dim=1).mean()
+        # self.log( "emb_mean_norm", emb_norm.item(), prog_bar=True )
+        reg_loss = torch.tensor(0.) # + self.hparams.emb_norm_reg * max((emb_norm - 12), 0)
+
+        loss = (mlm_loss + translate_loss + reg_loss)
+
+        self.log( "mlm_loss", mlm_loss.item() )
+        self.log( "translate_loss", translate_loss.item() )
+        self.log( "reg_loss", reg_loss.item() )
+
+        self.log( "loss", loss.item(), prog_bar=True )
 
         opt = self.optimizers()
         self.log("lr", opt.param_groups[0]['lr'], prog_bar=True)
@@ -179,59 +229,49 @@ class BertLightningModule(pl.LightningModule):
 
     def validation_step(self, batch: EncodingBatched, batch_idx: int):
 
-        bertout: modeling_outputs.BaseModelOutputWithPoolingAndCrossAttentions = self.bertmodel.forward(
-            input_ids=batch.src_encoding.tokens_ids,
-            attention_mask=batch.src_encoding.attention_masks,
-            token_type_ids=batch.src_encoding.special_tokens_masks
+        batch_echo = deepcopy(batch)
+        batch_echo.tokens_ids[:, 0] = self.tokenizer.token_to_id('[ECHO]')
+
+        tokens_to_mask = batch_echo.attention_masks & ( torch.randn(batch_echo.tokens_ids.size(), device=batch_echo.tokens_ids.device) > 0.9 )
+
+        mask_token_id = self.tokenizer.token_to_id('[MASK]')
+        batch_echo.tokens_ids[tokens_to_mask] = mask_token_id
+        batch_echo.special_tokens_masks[tokens_to_mask] = 1
+
+        mlm_bertout: modeling_outputs.BaseModelOutputWithPoolingAndCrossAttentions = self.bertmodel.forward(
+            input_ids=batch_echo.tokens_ids,
+            attention_mask=batch_echo.attention_masks,
+            token_type_ids=batch_echo.special_tokens_masks,
         )
 
-        tokens_embeddings = self.bertmodel.get_raw_embeddings(batch.trg_encoding)
+        mlm_tokens_embeddings = self.bertmodel.get_raw_embeddings(batch_echo)
 
-        loss = self.criterion( bertout.last_hidden_state, tokens_embeddings )
+        # ignore pad index
+        pad_tokens_mask = (batch_echo.attention_masks == 0).unsqueeze(-1)
+        mlm_bertout.last_hidden_state.masked_fill_( pad_tokens_mask, 0 )
+        mlm_tokens_embeddings.masked_fill_( pad_tokens_mask, 0 )
+        mlm_loss = self.criterion( mlm_bertout.last_hidden_state, mlm_tokens_embeddings )
+        mlm_loss = mlm_loss / (pad_tokens_mask.numel() - pad_tokens_mask.sum())
 
-        emb_norm = self.bertmodel.embeddings.word_embeddings.weight.pow(2).sum(dim=0).mean()
-        self.log( "emb_mean_norm", emb_norm.item(), prog_bar=True )
-        loss += self.hparams.emb_norm_reg * max((emb_norm - 11.97), 0)
+        self.log( "mlm_valid_loss", mlm_loss.item() )
 
-        self.log( "valid_loss", loss.item() )
-
-        word_embeddings = self.bertmodel.word_embeddings_from_lhs(bertout.last_hidden_state)
+        word_embeddings = self.bertmodel.word_embeddings_from_lhs(mlm_bertout.last_hidden_state)
         decoded_tokens = self.bertmodel.tokens_from_words_embeddings(word_embeddings)
 
-        non_pad_elems = (batch.trg_encoding.tokens_ids != 3)
-        tokens_matched = ((decoded_tokens == batch.trg_encoding.tokens_ids) & non_pad_elems).sum()
+        non_pad_elems = (batch.tokens_ids != self.tokenizer.token_to_id('[PAD]'))
+        tokens_matched = ((decoded_tokens == batch.tokens_ids) & non_pad_elems).sum()
 
         self.log( "tokens_matched", tokens_matched.item() )
         tokens_matched_accuracy = tokens_matched / non_pad_elems.sum().item()
         self.log( "tokens_matched_accuracy",  tokens_matched_accuracy.item(), prog_bar=True )
 
+        mlm_bertout = None
+        mlm_tokens_embeddings = None
+
+        # todo add translate
+        self.log( "valid_loss", mlm_loss.item() )
+
         return
-
-    # def validation_epoch_end(self, validation_step_outputs):
-    #     generated = []
-    #     references = []
-    #     sources = []
-
-    #     for vout in validation_step_outputs:
-    #         for gen_seq in vout[0]:
-    #             generated.append(gen_seq)
-    #         for trg_seq in vout[1]:
-    #             references.append([trg_seq])
-    #         for src_seq in vout[2]:
-    #             sources.append([src_seq])
-
-    #     translation_str = "\n\n\n".join(generated[:5])
-    #     target_str = "\n\n\n".join(x[0] for x in references[:5])
-    #     sources_str = "\n\n\n".join(x[0] for x in sources[:5])
-    #     self.logger.experiment.add_text("translate_decoded", translation_str)
-    #     self.logger.experiment.add_text("translate_target", target_str)
-    #     self.logger.experiment.add_text("translate_source", sources_str)
-
-    #     calculated_bleu = corpus_bleu(references, generated)
-    #     # print("calculated_bleu", calculated_bleu * 100)
-    #     self.log("valid_bleu", calculated_bleu * 100, prog_bar=True)
-
-    #     return
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -320,10 +360,12 @@ def cli_main(args=None):
         bert_model.hparams.scheduler = args.scheduler
         bert_model.hparams.scheduler_patience = args.scheduler_patience
         bert_model.hparams.noam_step_factor = args.noam_step_factor
+        bert_model.tokenizer = tokenizer
 
     else:
         args_dict = vars(args)
         lightning_module_args = { k: args_dict[k] for k in args_dict.keys() if args_dict[k] is not None }
+        lightning_module_args['tokenizer'] = tokenizer
         bert_model = BertLightningModule(**lightning_module_args)
 
     trainer_logger = pl.loggers.TensorBoardLogger("lightning_logs", name=args.name)

@@ -106,14 +106,17 @@ class WMT20DataModule(pl.LightningDataModule):
 
         return
 
+    def sort_by_len(self, dataset):
+        return sorted(dataset, key=lambda x: len(x['translation']['en']))
+
     def setup(self, stage=None):
 
         translation_dataset = load_dataset(self.dataset, self.languages)
         translation_dataset.set_format(columns='translation')
 
-        self.train = translation_dataset['train']
-        self.valid = translation_dataset['validation']
-        self.test  = translation_dataset['test']
+        self.train = self.sort_by_len(translation_dataset['train'])
+        self.valid = self.sort_by_len(translation_dataset['validation'])
+        self.test  = self.sort_by_len(translation_dataset['test'])
 
         return
 

@@ -8,9 +8,9 @@ stages:
     - .data/wmt20.bpetokenizer
   translate_bert_inv_tokens:
     cmd: python train_bert.py --name translate_bert_inv_tokens --tokenizer .data/wmt20.bpetokenizer
-      --dataset wmt20_mlqe_task1 --languages ru-en --batch_size 10 --noam_opt_warmup_steps 1000
-      --gpus 1 --limit_val_batches=15 --max_epochs 200 --early_stopping_patience 1000
-      --noam_scaler=0.3 --emb_norm_reg 0.0001
+      --dataset wmt20_mlqe_task1 --languages ru-en --batch_size 10 --noam_opt_warmup_steps
+      1000 --gpus 1 --limit_val_batches=15 --max_epochs 200 --early_stopping_patience
+      1000 --noam_scaler=1 --emb_norm_reg 0.0001
     deps:
     - .data/wmt20.bpetokenizer
     - train_bert.py

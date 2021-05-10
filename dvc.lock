@@ -34,20 +34,20 @@ stages:
   translate_bert_inv_tokens:
     cmd: python train_bert.py --name translate_bert_inv_tokens --tokenizer .data/wmt20.bpetokenizer
       --dataset wmt20_mlqe_task1 --languages ru-en --batch_size 10 --noam_opt_warmup_steps
-      1000 --gpus 1 --limit_val_batches=15 --max_epochs 15 --early_stopping_patience
-      1000 --noam_scaler=0.3 --emb_norm_reg 0.0001
+      1000 --gpus 1 --limit_val_batches=15 --max_epochs 200 --early_stopping_patience
+      1000 --noam_scaler=1 --emb_norm_reg 0.0001
     deps:
     - path: .data/wmt20.bpetokenizer
       md5: ead1ef249b71bc5582bae2de9509a790
       size: 898544
     - path: train_bert.py
-      md5: ad3bb85e8dd3f460bec9b9be4cc9beaf
-      size: 13462
+      md5: bfb4ec10cb5eec51f2883be74f4ee9fe
+      size: 15383
     - path: train_tokenizer.py
       md5: ba8acf6440d424120b8cc0972f1e85d8
       size: 1347
     outs:
     - path: lightning_logs/translate_bert_inv_tokens
-      md5: 01df3768351a9cc3bb2937d1ba979c26.dir
-      size: 113043107
+      md5: 9f5aaecc71f8820cb0fb59a3958aa393.dir
+      size: 151699755
       nfiles: 3
