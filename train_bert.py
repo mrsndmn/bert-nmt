@@ -136,7 +136,7 @@ class BertLightningModule(pl.LightningModule):
             "model_type": "bert",
 
             "num_attention_heads": 8,
-            "num_hidden_layers": 3,
+            "num_hidden_layers": 12,
 
             "pad_token_id": 0,
 
@@ -182,12 +182,12 @@ class BertLightningModule(pl.LightningModule):
         pad_tokens_mask = (batch_echo.attention_masks == 0).unsqueeze(-1).repeat(1, 1, hidden_size)
 
         # ignore pad index
-        # mlm_bertout.last_hidden_state[pad_tokens_mask] = mlm_tokens_embeddings[pad_tokens_mask]
+        mlm_bertout.last_hidden_state[pad_tokens_mask] = mlm_tokens_embeddings[pad_tokens_mask]
         # mlm_tokens_embeddings.masked_fill_( pad_tokens_mask, 0 )
 
         mlm_loss = self.criterion( mlm_bertout.last_hidden_state, mlm_tokens_embeddings )
-        # mlm_loss = mlm_loss / (pad_tokens_mask.numel() - pad_tokens_mask.sum())
-        mlm_loss = mlm_loss / pad_tokens_mask.numel()
+        mlm_loss = mlm_loss / (pad_tokens_mask.numel() - pad_tokens_mask.sum())
+        # mlm_loss = mlm_loss / pad_tokens_mask.numel()
 
         tokens_to_mask_cnt = tokens_to_mask.sum()
         if tokens_to_mask_cnt > 0:
@@ -313,7 +313,7 @@ class BertLightningModule(pl.LightningModule):
 # copy-paste https://github.com/PyTorchLightning/pytorch-lightning-bolts/blob/master/pl_bolts/models/autoencoders/basic_vae/basic_vae_module.py
 def cli_main(args=None):
 
-    pl.seed_everything()
+    pl.seed_everything(42)
 
     parser = ArgumentParser()
     parser.add_argument("--checkpoint", required=False, type=str)
