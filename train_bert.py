@@ -1,4 +1,4 @@
-
+import random
 import typing
 from argparse import ArgumentParser
 import math
@@ -149,17 +149,22 @@ class BertLightningModule(pl.LightningModule):
         self.bertmodel = BertModelInvertibleEmbeddings(devbert_config, add_pooling_layer=False)
         # self.bertmodel = BertForMaskedLM(config=devbert_config)
 
-        self.criterion = nn.L1Loss()
+        self.criterion = nn.L1Loss(reduction='sum')
 
         self.tokenizer: Tokenizer = tokenizer
 
+        self.logged_target_tokens = False
+
         return
 
-    def compute_mlm_loss(self, batch: EncodingBatched):
-        batch_echo = deepcopy(batch)
-        batch_echo.tokens_ids[:, 0] = self.tokenizer.token_to_id('[ECHO]')
+    def compute_mlm_loss(self, batch: EncodingBatched, decode_tokens=False):
 
-        tokens_to_mask = batch_echo.attention_masks & ( torch.randn(batch_echo.tokens_ids.size(), device=batch_echo.tokens_ids.device) > 0.9 )
+        mlm_batch = deepcopy(batch)
+        mlm_batch.tokens_ids[:, 0] = self.tokenizer.token_to_id('[ECHO]')
+
+        batch_echo = deepcopy(mlm_batch)
+
+        tokens_to_mask = (batch_echo.special_tokens_masks == 0) & ( torch.empty(batch_echo.tokens_ids.size(), device=batch_echo.tokens_ids.device).uniform_() > 0.9 )
 
         mask_token_id = self.tokenizer.token_to_id('[MASK]')
         batch_echo.tokens_ids[tokens_to_mask] = mask_token_id
@@ -171,15 +176,49 @@ class BertLightningModule(pl.LightningModule):
             token_type_ids=batch_echo.special_tokens_masks,
         )
 
-        mlm_tokens_embeddings = self.bertmodel.get_raw_embeddings(batch)
+        mlm_tokens_embeddings = self.bertmodel.get_raw_embeddings(mlm_batch)
+
+        hidden_size = mlm_tokens_embeddings.size(2)
+        pad_tokens_mask = (batch_echo.attention_masks == 0).unsqueeze(-1).repeat(1, 1, hidden_size)
 
         # ignore pad index
-        pad_tokens_mask = (batch_echo.attention_masks == 0).unsqueeze(-1)
-        mlm_bertout.last_hidden_state.masked_fill_( pad_tokens_mask, 0 )
-        mlm_tokens_embeddings.masked_fill_( pad_tokens_mask, 0 )
+        # mlm_bertout.last_hidden_state[pad_tokens_mask] = mlm_tokens_embeddings[pad_tokens_mask]
+        # mlm_tokens_embeddings.masked_fill_( pad_tokens_mask, 0 )
 
         mlm_loss = self.criterion( mlm_bertout.last_hidden_state, mlm_tokens_embeddings )
-        mlm_loss = mlm_loss / (pad_tokens_mask.numel() - pad_tokens_mask.sum())
+        # mlm_loss = mlm_loss / (pad_tokens_mask.numel() - pad_tokens_mask.sum())
+        mlm_loss = mlm_loss / pad_tokens_mask.numel()
+
+        tokens_to_mask_cnt = tokens_to_mask.sum()
+        if tokens_to_mask_cnt > 0:
+            masks_selector = tokens_to_mask.unsqueeze(-1).repeat(1, 1, mlm_tokens_embeddings.size(2))
+
+            masked_lhs_embeddings = mlm_bertout.last_hidden_state[masks_selector]
+            masked_mlm_tokens_embeddings = mlm_tokens_embeddings[masks_selector]
+            masks_loss = self.criterion( masked_lhs_embeddings, masked_mlm_tokens_embeddings ) / (tokens_to_mask_cnt * hidden_size)
+
+            self.log("masks_loss", masks_loss)
+
+            mlm_loss += masks_loss
+
+        if decode_tokens:
+            word_embeddings = self.bertmodel.word_embeddings_from_lhs(mlm_bertout.last_hidden_state)
+            decoded_tokens = self.bertmodel.tokens_from_words_embeddings(word_embeddings)
+
+            real_tokens_mask = (mlm_batch.attention_masks == 1)
+            tokens_matched = ((decoded_tokens == mlm_batch.tokens_ids) & real_tokens_mask).sum()
+
+            self.log( "tokens_matched", tokens_matched.item() )
+            tokens_matched_accuracy = tokens_matched / real_tokens_mask.sum().item()
+            self.log( "tokens_matched_accuracy",  tokens_matched_accuracy.item(), prog_bar=True )
+
+            mask_token_id = self.tokenizer.token_to_id('[MASK]')
+            self.log("num_decoded_masks", (decoded_tokens == mask_token_id).sum().item())
+
+            unk_token_id = self.tokenizer.token_to_id('[UNK]')
+            self.log("num_decoded_unkns", (decoded_tokens == unk_token_id).sum().item())
+
+            return mlm_bertout, mlm_loss, decoded_tokens
 
         return mlm_bertout, mlm_loss
 
@@ -201,22 +240,33 @@ class BertLightningModule(pl.LightningModule):
 
     def validation_step(self, batch: EncodingBatched, batch_idx: int):
 
-        mlm_bertout, loss = self.compute_mlm_loss(batch)
+        mlm_bertout, mlm_loss, decoded_tokens = self.compute_mlm_loss(batch, decode_tokens=True)
 
-        word_embeddings = self.bertmodel.word_embeddings_from_lhs(mlm_bertout.last_hidden_state)
-        decoded_tokens = self.bertmodel.tokens_from_words_embeddings(word_embeddings)
+        self.log( "valid_loss", mlm_loss.item() )
 
-        non_pad_elems = (batch.tokens_ids != self.tokenizer.token_to_id('[PAD]'))
-        tokens_matched = ((decoded_tokens == batch.tokens_ids) & non_pad_elems).sum()
+        return batch.tokens_ids, decoded_tokens
 
-        self.log( "tokens_matched", tokens_matched.item() )
-        tokens_matched_accuracy = tokens_matched / non_pad_elems.sum().item()
-        self.log( "tokens_matched_accuracy",  tokens_matched_accuracy.item(), prog_bar=True )
+    def validation_epoch_end(self, valid_steps_outs):
 
-        mask_token_id = self.tokenizer.token_to_id('[MASK]')
-        self.log("num_decoded_masks", (decoded_tokens == mask_token_id).sum().item())
+        berts_tokens = []
+        target_tokens = []
+        for batch in valid_steps_outs:
+            batch_bert_tokens = self.tokenizer.decode_batch(batch[1].detach().cpu().numpy().tolist(), skip_special_tokens=False)
 
-        self.log( "valid_loss", loss.item() )
+            berts_tokens.extend(batch_bert_tokens)
+
+        berts_tokens_log = random.sample(berts_tokens, min(len(berts_tokens), 5))
+        self.logger.experiment.add_text("bert_outputs", "\n\n\n".join(berts_tokens_log))
+
+
+        if not self.logged_target_tokens:
+            for batch in valid_steps_outs:
+
+                batch_target_tokens  = self.tokenizer.decode_batch(batch[0].detach().cpu().numpy().tolist(), skip_special_tokens=False)
+                target_tokens.extend(batch_target_tokens)
+
+            self.logger.experiment.add_text("target_outputs", "\n\n\n".join(target_tokens))
+            self.logged_target_tokens = True
 
         return
 
@@ -286,7 +336,11 @@ def cli_main(args=None):
 
     args = parser.parse_args(args)
 
+    import os
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     tokenizer = Tokenizer.from_file(args.tokenizer)
+    # [UNK],[SEP],[PAD],[MASK],[ECHO],[TRANSLATE]
     special_tokens = [ '[UNK]', '[PAD]', '[TRANSLATE]', '[ECHO]', '[MASK]', '[SEP]', ]
     assert tokenizer.add_special_tokens(special_tokens) == 0, f'one of special tokens not in tokenizer: {special_tokens}'
 

@@ -93,7 +93,8 @@ class WMT20DataModule(pl.LightningDataModule):
             raise ValueError(f"languages is required for {self}")
         self.languages = languages
         self.tokenizer = tokenizer
-        self.tokenizer.enable_padding(pad_id=3, pad_token="[PAD]")
+        pad_token = "[PAD]"
+        self.tokenizer.enable_padding(pad_id=tokenizer.token_to_id(pad_token), pad_token=pad_token)
 
         translate_postprocessor = TemplateProcessing(
             single="[TRANSLATE] $0 [SEP]",
