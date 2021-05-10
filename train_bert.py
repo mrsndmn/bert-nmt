@@ -147,8 +147,9 @@ class BertLightningModule(pl.LightningModule):
         self.save_hyperparameters( *self.all_hyperparameters_list )
 
         self.bertmodel = BertModelInvertibleEmbeddings(devbert_config, add_pooling_layer=False)
+        # self.bertmodel = BertForMaskedLM(config=devbert_config)
 
-        self.criterion = nn.L1Loss()
+        self.criterion = nn.MSELoss()
 
         self.tokenizer: Tokenizer = tokenizer
 
@@ -264,6 +265,9 @@ class BertLightningModule(pl.LightningModule):
         self.log( "tokens_matched", tokens_matched.item() )
         tokens_matched_accuracy = tokens_matched / non_pad_elems.sum().item()
         self.log( "tokens_matched_accuracy",  tokens_matched_accuracy.item(), prog_bar=True )
+
+        self.log("num_input_masks", tokens_to_mask.sum().item())
+        self.log("num_decoded_masks", (decoded_tokens == mask_token_id).sum().item())
 
         mlm_bertout = None
         mlm_tokens_embeddings = None
