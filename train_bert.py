@@ -136,7 +136,7 @@ class BertLightningModule(pl.LightningModule):
             "model_type": "bert",
 
             "num_attention_heads": 8,
-            "num_hidden_layers": 12,
+            "num_hidden_layers": 24,
 
             "pad_token_id": 0,
 
