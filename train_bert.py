@@ -125,9 +125,9 @@ class BertLightningModule(pl.LightningModule):
         super(BertLightningModule, self).__init__()
 
         devbert_config = BertConfig.from_dict({
-            "attention_probs_dropout_prob": 0.1,
+            "attention_probs_dropout_prob": 0.05,
             "hidden_act": "gelu",
-            "hidden_dropout_prob": 0.1,
+            "hidden_dropout_prob": 0.05,
             "hidden_size": 256,
             "initializer_range": 0.02,
             "intermediate_size": 1024,
