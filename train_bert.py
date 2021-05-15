@@ -134,7 +134,7 @@ class BertLightningModule(pl.LightningModule):
             "model_type": "bert",
 
             "num_attention_heads": 8,
-            "num_hidden_layers": 4,
+            "num_hidden_layers": 12,
 
             "pad_token_id": 0,
 
@@ -148,13 +148,31 @@ class BertLightningModule(pl.LightningModule):
         # self.bertmodel = BertForMaskedLM(config=devbert_config)
 
         # self.criterion = nn.L1Loss(reduction='sum')
-        self.criterion = nn.TripletMarginWithDistanceLoss()
+        self.criterion = nn.TripletMarginWithDistanceLoss(reduction='mean', margin=1)
+        self.distance = nn.PairwiseDistance()
 
         self.tokenizer: Tokenizer = tokenizer
 
         self.logged_target_tokens = False
 
         return
+
+    def get_non_pad_embeddings(self, hidden_states, attention_masks):
+
+        embeddings = []
+
+        for batch_n in range(attention_masks.size(0)):
+            for seq_n in range(attention_masks.size(1)):
+                if attention_masks[batch_n, seq_n] == 0:
+                    break
+                embeddings.append( hidden_states[batch_n, seq_n, :] )
+
+        result = torch.vstack(embeddings)
+
+        assert result.size(0) == attention_masks.sum()
+        assert result.size(1) == hidden_states.size(-1)
+
+        return result
 
     def compute_mlm_loss(self, batch: EncodingBatched, decode_tokens=False):
 
@@ -175,20 +193,21 @@ class BertLightningModule(pl.LightningModule):
             token_type_ids=batch_echo.special_tokens_masks,
         )
 
-        mlm_tokens_embeddings = self.bertmodel.get_raw_embeddings(
-            tokens_ids=mlm_batch.tokens_ids,
-            special_tokens_masks=mlm_batch.special_tokens_masks
-        )
+        with torch.no_grad():
+            mlm_tokens_embeddings = self.bertmodel.get_raw_embeddings(
+                tokens_ids=mlm_batch.tokens_ids,
+                special_tokens_masks=mlm_batch.special_tokens_masks
+            )
 
         hidden_size = mlm_tokens_embeddings.size(2)
-        pad_tokens_mask = (batch_echo.attention_masks == 0).unsqueeze(-1).repeat(1, 1, hidden_size)
 
         # ignore pad index
+        # pad_tokens_mask = (batch_echo.attention_masks == 0).unsqueeze(-1).repeat(1, 1, hidden_size)
         # mlm_bertout.last_hidden_state[pad_tokens_mask] = mlm_tokens_embeddings[pad_tokens_mask]
         # mlm_tokens_embeddings.masked_fill_( pad_tokens_mask, 0 )
 
-        anchor = mlm_bertout.last_hidden_state.view( -1, hidden_size )
-        positive = mlm_tokens_embeddings.view( -1, hidden_size )
+        anchor = self.get_non_pad_embeddings(mlm_bertout.last_hidden_state, batch_echo.attention_masks) # .view( -1, hidden_size )
+        positive = self.get_non_pad_embeddings(mlm_tokens_embeddings, batch_echo.attention_masks) # .view( -1, hidden_size )
 
         negative_tokens = torch.randint_like(
             batch_echo.tokens_ids,
@@ -196,11 +215,22 @@ class BertLightningModule(pl.LightningModule):
             device=batch_echo.tokens_ids.device,
             dtype=batch_echo.tokens_ids.dtype
         )
-        negative = self.bertmodel.get_raw_embeddings( tokens_ids=negative_tokens ).view( -1, hidden_size )
+
+        with torch.no_grad():
+            negative = self.bertmodel.get_raw_embeddings( tokens_ids=negative_tokens )
+            negative = self.get_non_pad_embeddings(negative, batch_echo.attention_masks) # .view( -1, hidden_size )
+
+
+        # active_tokens_cnt = (batch_echo.attention_masks == 1).sum().item()
 
         # print("anchor", anchor.shape, "positive", positive.shape, "negative", negative.shape)
-        mlm_loss = self.criterion( anchor, positive, negative )
-        mlm_loss = mlm_loss / batch_echo.tokens_ids.numel()
+        tmwd_loss = self.criterion( anchor, positive, negative )
+        self.log('tmwd_loss', tmwd_loss.item())
+
+        positive_loss = self.distance(anchor, positive).mean()
+        self.log('positive_loss', positive_loss.item())
+
+        mlm_loss = tmwd_loss + positive_loss * 0.5
 
         # tokens_to_mask_cnt = tokens_to_mask.sum()
         # if tokens_to_mask_cnt > 0:
@@ -330,8 +360,8 @@ def cli_main(args=None):
     parser.add_argument("--strict", default=False, action='store_true')
     parser.add_argument("--name", type=str, required=True)
 
-    parser.add_argument("--early_stopping_monitor", type=str, default='valid_loss')
-    parser.add_argument("--early_stopping_mode", type=str, default='min')
+    parser.add_argument("--early_stopping_monitor", type=str, default='tokens_matched_accuracy')
+    parser.add_argument("--early_stopping_mode", type=str, default='max')
     parser.add_argument("--early_stopping_min_delta", type=float, default=0.001)
     parser.add_argument("--early_stopping_patience", type=int, default=3)
 
