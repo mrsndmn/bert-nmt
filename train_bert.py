@@ -34,24 +34,22 @@ class BertModelInvertibleEmbeddings(BertModel):
 
         return
 
-    def get_raw_embeddings(self, batch: EncodingBatched):
+    def get_raw_embeddings(self, tokens_ids=None, special_tokens_masks=None):
+        layer_norm = self.embeddings.LayerNorm
 
-        with torch.no_grad():
-            layer_norm = self.embeddings.LayerNorm
+        self.embeddings.LayerNorm = DoNothing()
 
-            self.embeddings.LayerNorm = DoNothing()
+        was_dropout_trainig = self.embeddings.training
+        eval_emb = self.embeddings.eval()
+        tokens_embeddings = eval_emb.forward(
+            input_ids=tokens_ids,
+            token_type_ids=special_tokens_masks,
+        )
 
-            was_dropout_trainig = self.embeddings.training
-            eval_emb = self.embeddings.eval()
-            tokens_embeddings = eval_emb.forward(
-                input_ids=batch.tokens_ids,
-                token_type_ids=batch.special_tokens_masks,
-            )
+        if was_dropout_trainig:
+            self.embeddings.train()
 
-            if was_dropout_trainig:
-                self.embeddings.train()
-
-            self.embeddings.LayerNorm = layer_norm
+        self.embeddings.LayerNorm = layer_norm
 
 
         return tokens_embeddings
@@ -136,7 +134,7 @@ class BertLightningModule(pl.LightningModule):
             "model_type": "bert",
 
             "num_attention_heads": 8,
-            "num_hidden_layers": 12,
+            "num_hidden_layers": 4,
 
             "pad_token_id": 0,
 
@@ -149,7 +147,8 @@ class BertLightningModule(pl.LightningModule):
         self.bertmodel = BertModelInvertibleEmbeddings(devbert_config, add_pooling_layer=False)
         # self.bertmodel = BertForMaskedLM(config=devbert_config)
 
-        self.criterion = nn.L1Loss(reduction='sum')
+        # self.criterion = nn.L1Loss(reduction='sum')
+        self.criterion = nn.TripletMarginWithDistanceLoss()
 
         self.tokenizer: Tokenizer = tokenizer
 
@@ -176,7 +175,10 @@ class BertLightningModule(pl.LightningModule):
             token_type_ids=batch_echo.special_tokens_masks,
         )
 
-        mlm_tokens_embeddings = self.bertmodel.get_raw_embeddings(mlm_batch)
+        mlm_tokens_embeddings = self.bertmodel.get_raw_embeddings(
+            tokens_ids=mlm_batch.tokens_ids,
+            special_tokens_masks=mlm_batch.special_tokens_masks
+        )
 
         hidden_size = mlm_tokens_embeddings.size(2)
         pad_tokens_mask = (batch_echo.attention_masks == 0).unsqueeze(-1).repeat(1, 1, hidden_size)
@@ -185,21 +187,29 @@ class BertLightningModule(pl.LightningModule):
         # mlm_bertout.last_hidden_state[pad_tokens_mask] = mlm_tokens_embeddings[pad_tokens_mask]
         # mlm_tokens_embeddings.masked_fill_( pad_tokens_mask, 0 )
 
-        mlm_loss = self.criterion( mlm_bertout.last_hidden_state, mlm_tokens_embeddings )
-        # mlm_loss = mlm_loss / (pad_tokens_mask.numel() - pad_tokens_mask.sum())
-        mlm_loss = mlm_loss / pad_tokens_mask.numel()
+        anchor = mlm_bertout.last_hidden_state.view( -1, hidden_size )
+        positive = mlm_tokens_embeddings.view( -1, hidden_size )
 
-        tokens_to_mask_cnt = tokens_to_mask.sum()
-        if tokens_to_mask_cnt > 0:
-            masks_selector = tokens_to_mask.unsqueeze(-1).repeat(1, 1, mlm_tokens_embeddings.size(2))
+        negative_tokens = torch.randint_like(
+            batch_echo.tokens_ids,
+            high=self.bertmodel.config.vocab_size,
+            device=batch_echo.tokens_ids.device,
+            dtype=batch_echo.tokens_ids.dtype
+        )
+        negative = self.bertmodel.get_raw_embeddings( tokens_ids=negative_tokens ).view( -1, hidden_size )
 
-            masked_lhs_embeddings = mlm_bertout.last_hidden_state[masks_selector]
-            masked_mlm_tokens_embeddings = mlm_tokens_embeddings[masks_selector]
-            masks_loss = self.criterion( masked_lhs_embeddings, masked_mlm_tokens_embeddings ) / (tokens_to_mask_cnt * hidden_size)
+        # print("anchor", anchor.shape, "positive", positive.shape, "negative", negative.shape)
+        mlm_loss = self.criterion( anchor, positive, negative )
+        mlm_loss = mlm_loss / batch_echo.tokens_ids.numel()
 
-            self.log("masks_loss", masks_loss)
-
-            mlm_loss += masks_loss
+        # tokens_to_mask_cnt = tokens_to_mask.sum()
+        # if tokens_to_mask_cnt > 0:
+        #     masks_selector = tokens_to_mask.unsqueeze(-1).repeat(1, 1, mlm_tokens_embeddings.size(2))
+        #     masked_lhs_embeddings = mlm_bertout.last_hidden_state[masks_selector]
+        #     masked_mlm_tokens_embeddings = mlm_tokens_embeddings[masks_selector]
+        #     masks_loss = self.criterion( masked_lhs_embeddings, masked_mlm_tokens_embeddings ) / (tokens_to_mask_cnt * hidden_size)
+        #     self.log("masks_loss", masks_loss)
+        #     mlm_loss += masks_loss
 
         if decode_tokens:
             word_embeddings = self.bertmodel.word_embeddings_from_lhs(mlm_bertout.last_hidden_state)
@@ -276,11 +286,11 @@ class BertLightningModule(pl.LightningModule):
 
         parser.add_argument("--noam_opt_warmup_steps", type=int)
 
-        parser.add_argument("--lr", type=float)
+        parser.add_argument("--lr", type=float, default=1)
         parser.add_argument("--scheduler", default="noam")
         parser.add_argument("--scheduler_patience")
-        parser.add_argument("--noam_step_factor", type=float)
-        parser.add_argument("--noam_scaler", type=float)
+        parser.add_argument("--noam_step_factor", type=float, default=1)
+        parser.add_argument("--noam_scaler", type=float, default=1)
         parser.add_argument("--emb_norm_reg", type=float, default=0.001)
 
         return parser
