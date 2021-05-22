@@ -141,14 +141,13 @@ class BertLightningModule(pl.LightningModule):
             "type_vocab_size": 2, # todo increase type vocab size
             "vocab_size": 30000,
         })
+        self.devbert_config = devbert_config
 
         self.save_hyperparameters( *self.all_hyperparameters_list )
 
         self.bertmodel = BertForMaskedLM(config=devbert_config)
 
         self.tokenizer: Tokenizer = tokenizer
-
-        self.logged_target_tokens = False
 
         return
 
@@ -238,7 +237,6 @@ class BertLightningModule(pl.LightningModule):
     def validation_epoch_end(self, valid_steps_outs):
 
         berts_tokens = []
-        target_tokens = []
         for batch in valid_steps_outs:
             batch_bert_tokens = self.tokenizer.decode_batch(batch[1].detach().cpu().numpy().tolist(), skip_special_tokens=False)
 
@@ -246,16 +244,6 @@ class BertLightningModule(pl.LightningModule):
 
         berts_tokens_log = random.sample(berts_tokens, min(len(berts_tokens), 5))
         self.logger.experiment.add_text("bert_outputs", "\n\n\n".join(berts_tokens_log))
-
-
-        if not self.logged_target_tokens:
-            for batch in valid_steps_outs:
-
-                batch_target_tokens  = self.tokenizer.decode_batch(batch[0].detach().cpu().numpy().tolist(), skip_special_tokens=False)
-                target_tokens.extend(batch_target_tokens)
-
-            self.logger.experiment.add_text("target_outputs", "\n\n\n".join(target_tokens))
-            self.logged_target_tokens = True
 
         return
 
@@ -299,11 +287,42 @@ class BertLightningModule(pl.LightningModule):
 
         return [opt], [{"scheduler": opt_sched, "interval": "step", "monitor": "loss"}]
 
+
+class BertTranslateLightningModule(BertLightningModule):
+
+    def compute_mlm_loss(self, batch: EncodingBatched, decode_tokens=False):
+
+        mlm_batch = deepcopy(batch)
+        mlm_batch.tokens_ids[:, 0] = self.tokenizer.token_to_id('[TRANSLATE]')
+
+        mlm_bertout: modeling_outputs.MaskedLMOutput = self.bertmodel.forward(
+            input_ids=mlm_batch.src_encoding.tokens_ids,
+            attention_mask=mlm_batch.src_encoding.attention_masks,
+            token_type_ids=mlm_batch.src_encoding.special_tokens_masks,
+            labels=mlm_batch.trg_encoding.tokens_ids
+        )
+
+        if decode_tokens:
+            logits = mlm_bertout.logits.view(-1, self.bertmodel.config.vocab_size)
+            _, predicted_tokens = logits.max(dim=1)
+            predicted_tokens = predicted_tokens.reshape(mlm_batch.trg_encoding.tokens_ids.size())
+
+            real_tokens_mask = (mlm_batch.trg_encoding.attention_masks == 1)
+            tokens_matched = ((predicted_tokens == mlm_batch.trg_encoding.tokens_ids) & real_tokens_mask).sum()
+
+            self.log( "tokens_matched", tokens_matched.item() )
+            tokens_matched_accuracy = tokens_matched / real_tokens_mask.sum().item()
+            self.log( "tokens_matched_accuracy",  tokens_matched_accuracy.item(), prog_bar=True )
+
+            return mlm_bertout, mlm_bertout.loss, torch.cat([mlm_batch.src_encoding.tokens_ids, mlm_batch.trg_encoding.tokens_ids, predicted_tokens], dim=1)
+
+        return mlm_bertout, mlm_bertout.loss
+
 class BertIELightningModule(BertLightningModule):
     def __init__(self, **kwargs):
         super().__init__(self, **kwargs)
 
-        self.bertmodel = BertModelInvertibleEmbeddings(devbert_config, add_pooling_layer=False)
+        self.bertmodel = BertModelInvertibleEmbeddings(self.devbert_config, add_pooling_layer=False)
         # self.criterion = nn.L1Loss(reduction='sum')
         self.criterion = nn.TripletMarginWithDistanceLoss(reduction='mean', margin=1)
         self.distance = nn.PairwiseDistance()
@@ -417,6 +436,8 @@ def cli_main(args=None):
     parser.add_argument('--dataset', help='datasets dataset name', type=str, required=True)
     parser.add_argument('--languages', help='dataset languages to tokenize', type=str, required=True)
 
+    parser.add_argument('--blm_class', help='Bert Lightning Module to train', type=str)
+
     dm_class = WMT20DataModule
     parser = dm_class.add_argparse_args(parser)
     parser = BertLightningModule.add_model_specific_args(parser)
@@ -440,9 +461,20 @@ def cli_main(args=None):
     if args.max_steps == -1:
         args.max_steps = None
 
+    blm_class = BertLightningModule
+    if args.blm_class == 'BertTranslateLightningModule':
+        blm_class = BertTranslateLightningModule
+    elif args.blm_class == 'BertLightningModule':
+        blm_class = BertLightningModule
+    elif args.blm_class == 'BertIELightningModule':
+        blm_class = BertIELightningModule
+    else:
+        raise ValueError("unknown blm_class")
+
+
     if args.checkpoint is not None:
         print("Restoring from checkpoint", args.checkpoint)
-        bert_model = BertLightningModule.load_from_checkpoint(args.checkpoint, strict=args.strict)
+        bert_model = blm_class.load_from_checkpoint(args.checkpoint, strict=args.strict)
         bert_model.hparams.noam_scaler = args.noam_scaler
         bert_model.hparams.lr= args.lr
         bert_model.hparams.noam_opt_warmup_steps = args.noam_opt_warmup_steps
@@ -455,7 +487,7 @@ def cli_main(args=None):
         args_dict = vars(args)
         lightning_module_args = { k: args_dict[k] for k in args_dict.keys() if args_dict[k] is not None }
         lightning_module_args['tokenizer'] = tokenizer
-        bert_model = BertLightningModule(**lightning_module_args)
+        bert_model = blm_class(**lightning_module_args)
 
     trainer_logger = pl.loggers.TensorBoardLogger("lightning_logs", name=args.name)
     early_stop_callback = pl.callbacks.EarlyStopping(

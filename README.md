@@ -14,3 +14,8 @@
 * https://www.aclweb.org/anthology/P19-1019.pdf
 * https://arxiv.org/pdf/1804.07755.pdf
 * https://arxiv.org/pdf/2001.08210.pdf
+
+
+* обучаем по словарю
+* scaling up transformers like efficient nets?
+* Recurrent Bert разное количество слоев
