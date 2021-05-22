@@ -6,7 +6,7 @@ from nltk.translate.bleu_score import corpus_bleu
 from copy import deepcopy
 
 import transformers.modeling_outputs as modeling_outputs
-from transformers.models.bert.modeling_bert import BertModel
+from transformers.models.bert.modeling_bert import BertModel, BertForMaskedLM
 from transformers.models.bert.configuration_bert import BertConfig
 from transformers.models.bert.tokenization_bert import BertTokenizer
 
@@ -144,12 +144,7 @@ class BertLightningModule(pl.LightningModule):
 
         self.save_hyperparameters( *self.all_hyperparameters_list )
 
-        self.bertmodel = BertModelInvertibleEmbeddings(devbert_config, add_pooling_layer=False)
-        # self.bertmodel = BertForMaskedLM(config=devbert_config)
-
-        # self.criterion = nn.L1Loss(reduction='sum')
-        self.criterion = nn.TripletMarginWithDistanceLoss(reduction='mean', margin=1)
-        self.distance = nn.PairwiseDistance()
+        self.bertmodel = BertForMaskedLM(config=devbert_config)
 
         self.tokenizer: Tokenizer = tokenizer
 
@@ -173,6 +168,145 @@ class BertLightningModule(pl.LightningModule):
         assert result.size(1) == hidden_states.size(-1)
 
         return result
+
+    def compute_mlm_loss(self, batch: EncodingBatched, decode_tokens=False):
+
+        mlm_batch = deepcopy(batch)
+        mlm_batch.tokens_ids[:, 0] = self.tokenizer.token_to_id('[ECHO]')
+
+        batch_echo = deepcopy(mlm_batch)
+
+        tokens_to_mask = (batch_echo.special_tokens_masks == 0) & ( torch.empty(batch_echo.tokens_ids.size(), device=batch_echo.tokens_ids.device).uniform_() > 0.9 )
+
+        mask_token_id = self.tokenizer.token_to_id('[MASK]')
+        batch_echo.tokens_ids[tokens_to_mask] = mask_token_id
+        batch_echo.special_tokens_masks[tokens_to_mask] = 1
+
+        mlm_bertout: modeling_outputs.MaskedLMOutput = self.bertmodel.forward(
+            input_ids=batch_echo.tokens_ids,
+            attention_mask=batch_echo.attention_masks,
+            token_type_ids=batch_echo.special_tokens_masks,
+            labels=mlm_batch.tokens_ids
+        )
+
+        if decode_tokens:
+            logits = mlm_bertout.logits.view(-1, self.bertmodel.config.vocab_size)
+            _, predicted_tokens = logits.max(dim=1)
+            predicted_tokens = predicted_tokens.reshape(mlm_batch.tokens_ids.size())
+
+            real_tokens_mask = (mlm_batch.attention_masks == 1)
+            tokens_matched = ((predicted_tokens == mlm_batch.tokens_ids) & real_tokens_mask).sum()
+
+            self.log( "tokens_matched", tokens_matched.item() )
+            tokens_matched_accuracy = tokens_matched / real_tokens_mask.sum().item()
+            self.log( "tokens_matched_accuracy",  tokens_matched_accuracy.item(), prog_bar=True )
+
+            mask_token_id = self.tokenizer.token_to_id('[MASK]')
+            self.log("num_decoded_masks", (predicted_tokens == mask_token_id).sum().item())
+
+            unk_token_id = self.tokenizer.token_to_id('[UNK]')
+            self.log("num_decoded_unkns", (predicted_tokens == unk_token_id).sum().item())
+
+            return mlm_bertout, mlm_bertout.loss, predicted_tokens
+
+        return mlm_bertout, mlm_bertout.loss
+
+    def training_step(self, batch: EncodingBatched, batch_idx):
+
+        # sequential!
+        # MLM
+        # BrokenMLM
+        # Translate
+        # FixLM
+
+        mlm_bertout, loss = self.compute_mlm_loss(batch)
+        self.log( "loss", loss.item())
+
+        opt = self.optimizers()
+        self.log("lr", opt.param_groups[0]['lr'], prog_bar=True)
+
+        return loss
+
+    def validation_step(self, batch: EncodingBatched, batch_idx: int):
+
+        mlm_bertout, mlm_loss, decoded_tokens = self.compute_mlm_loss(batch, decode_tokens=True)
+
+        self.log( "valid_loss", mlm_loss.item() )
+
+        return batch.tokens_ids, decoded_tokens
+
+    def validation_epoch_end(self, valid_steps_outs):
+
+        berts_tokens = []
+        target_tokens = []
+        for batch in valid_steps_outs:
+            batch_bert_tokens = self.tokenizer.decode_batch(batch[1].detach().cpu().numpy().tolist(), skip_special_tokens=False)
+
+            berts_tokens.extend(batch_bert_tokens)
+
+        berts_tokens_log = random.sample(berts_tokens, min(len(berts_tokens), 5))
+        self.logger.experiment.add_text("bert_outputs", "\n\n\n".join(berts_tokens_log))
+
+
+        if not self.logged_target_tokens:
+            for batch in valid_steps_outs:
+
+                batch_target_tokens  = self.tokenizer.decode_batch(batch[0].detach().cpu().numpy().tolist(), skip_special_tokens=False)
+                target_tokens.extend(batch_target_tokens)
+
+            self.logger.experiment.add_text("target_outputs", "\n\n\n".join(target_tokens))
+            self.logged_target_tokens = True
+
+        return
+
+    @staticmethod
+    def add_model_specific_args(parent_parser):
+        parser = ArgumentParser(parents=[parent_parser], add_help=False)
+
+        parser.add_argument("--noam_opt_warmup_steps", type=int)
+
+        parser.add_argument("--lr", type=float, default=1)
+        parser.add_argument("--scheduler", default="noam")
+        parser.add_argument("--scheduler_patience")
+        parser.add_argument("--noam_step_factor", type=float, default=1)
+        parser.add_argument("--noam_scaler", type=float, default=1)
+        parser.add_argument("--emb_norm_reg", type=float, default=0.001)
+
+        return parser
+
+    def noam_opt(self, current_step: int):
+        current_step = self.trainer.global_step * self.hparams.noam_step_factor
+        min_inv_sqrt = min(1/math.sqrt(current_step+1), current_step * self.hparams.noam_opt_warmup_steps ** (-1.5))
+        current_lr = min_inv_sqrt / math.sqrt(self.bertmodel.config.hidden_size)
+        current_lr *= self.hparams.noam_scaler
+        return current_lr
+
+    def configure_optimizers(self):
+        opt = torch.optim.Adam(self.bertmodel.parameters(), lr=self.hparams.lr)
+
+        if self.hparams.scheduler == "no":
+            return opt
+        elif self.hparams.scheduler == "noam":
+            opt_sched = torch.optim.lr_scheduler.LambdaLR(opt, self.noam_opt)
+        elif self.hparams.scheduler == "pletau":
+            scheduler_patience = self.hparams.scheduler_patience
+            if scheduler_patience is None:
+                scheduler_patience = 10
+            opt_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, 'min', patience=scheduler_patience, min_lr=1e-5, factor=0.5, verbose=True)
+        else:
+            raise ValueError("unknown scheduler " + self.hparams.scheduler)
+
+
+        return [opt], [{"scheduler": opt_sched, "interval": "step", "monitor": "loss"}]
+
+class BertIELightningModule(BertLightningModule):
+    def __init__(self, **kwargs):
+        super().__init__(self, **kwargs)
+
+        self.bertmodel = BertModelInvertibleEmbeddings(devbert_config, add_pooling_layer=False)
+        # self.criterion = nn.L1Loss(reduction='sum')
+        self.criterion = nn.TripletMarginWithDistanceLoss(reduction='mean', margin=1)
+        self.distance = nn.PairwiseDistance()
 
     def compute_mlm_loss(self, batch: EncodingBatched, decode_tokens=False):
 
@@ -262,93 +396,7 @@ class BertLightningModule(pl.LightningModule):
 
         return mlm_bertout, mlm_loss
 
-    def training_step(self, batch: EncodingBatched, batch_idx):
 
-        # sequential!
-        # MLM
-        # BrokenMLM
-        # Translate
-        # FixLM
-
-        mlm_bertout, loss = self.compute_mlm_loss(batch)
-        self.log( "loss", loss.item())
-
-        opt = self.optimizers()
-        self.log("lr", opt.param_groups[0]['lr'], prog_bar=True)
-
-        return loss
-
-    def validation_step(self, batch: EncodingBatched, batch_idx: int):
-
-        mlm_bertout, mlm_loss, decoded_tokens = self.compute_mlm_loss(batch, decode_tokens=True)
-
-        self.log( "valid_loss", mlm_loss.item() )
-
-        return batch.tokens_ids, decoded_tokens
-
-    def validation_epoch_end(self, valid_steps_outs):
-
-        berts_tokens = []
-        target_tokens = []
-        for batch in valid_steps_outs:
-            batch_bert_tokens = self.tokenizer.decode_batch(batch[1].detach().cpu().numpy().tolist(), skip_special_tokens=False)
-
-            berts_tokens.extend(batch_bert_tokens)
-
-        berts_tokens_log = random.sample(berts_tokens, min(len(berts_tokens), 5))
-        self.logger.experiment.add_text("bert_outputs", "\n\n\n".join(berts_tokens_log))
-
-
-        if not self.logged_target_tokens:
-            for batch in valid_steps_outs:
-
-                batch_target_tokens  = self.tokenizer.decode_batch(batch[0].detach().cpu().numpy().tolist(), skip_special_tokens=False)
-                target_tokens.extend(batch_target_tokens)
-
-            self.logger.experiment.add_text("target_outputs", "\n\n\n".join(target_tokens))
-            self.logged_target_tokens = True
-
-        return
-
-    @staticmethod
-    def add_model_specific_args(parent_parser):
-        parser = ArgumentParser(parents=[parent_parser], add_help=False)
-
-        parser.add_argument("--noam_opt_warmup_steps", type=int)
-
-        parser.add_argument("--lr", type=float, default=1)
-        parser.add_argument("--scheduler", default="noam")
-        parser.add_argument("--scheduler_patience")
-        parser.add_argument("--noam_step_factor", type=float, default=1)
-        parser.add_argument("--noam_scaler", type=float, default=1)
-        parser.add_argument("--emb_norm_reg", type=float, default=0.001)
-
-        return parser
-
-    def noam_opt(self, current_step: int):
-        current_step = self.trainer.global_step * self.hparams.noam_step_factor
-        min_inv_sqrt = min(1/math.sqrt(current_step+1), current_step * self.hparams.noam_opt_warmup_steps ** (-1.5))
-        current_lr = min_inv_sqrt / math.sqrt(self.bertmodel.config.hidden_size)
-        current_lr *= self.hparams.noam_scaler
-        return current_lr
-
-    def configure_optimizers(self):
-        opt = torch.optim.Adam(self.bertmodel.parameters(), lr=self.hparams.lr)
-
-        if self.hparams.scheduler == "no":
-            return opt
-        elif self.hparams.scheduler == "noam":
-            opt_sched = torch.optim.lr_scheduler.LambdaLR(opt, self.noam_opt)
-        elif self.hparams.scheduler == "pletau":
-            scheduler_patience = self.hparams.scheduler_patience
-            if scheduler_patience is None:
-                scheduler_patience = 10
-            opt_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, 'min', patience=scheduler_patience, min_lr=1e-5, factor=0.5, verbose=True)
-        else:
-            raise ValueError("unknown scheduler " + self.hparams.scheduler)
-
-
-        return [opt], [{"scheduler": opt_sched, "interval": "step", "monitor": "loss"}]
 
 # copy-paste https://github.com/PyTorchLightning/pytorch-lightning-bolts/blob/master/pl_bolts/models/autoencoders/basic_vae/basic_vae_module.py
 def cli_main(args=None):
