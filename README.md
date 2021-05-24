@@ -22,3 +22,7 @@
 
 Adversarial NMT -- может быть хорошо применено к прогрессивному переводу
 * https://arxiv.org/pdf/1905.11946v5.pdf
+
+non autoregressive nmt
+* https://www.aclweb.org/anthology/2020.autosimtrans-1.4/
+* https://openreview.net/forum?id=wOI9hqkvu_
