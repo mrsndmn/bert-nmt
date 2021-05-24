@@ -112,12 +112,17 @@ class WMT20DataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
 
-        translation_dataset = load_dataset(self.dataset, self.languages)
-        translation_dataset.set_format(columns='translation')
+        ncd = NewsCommentaryTranslationDataset()
 
-        self.train = self.sort_by_len(translation_dataset['train'])
-        self.valid = self.sort_by_len(translation_dataset['validation'])
-        self.test  = self.sort_by_len(translation_dataset['test'])
+        valid_len = 20000
+        self.train, self.valid = torch.utils.data.random_split(ncd, [len(ncd) - valid_len, valid_len], generator=torch.Generator().manual_seed(42))
+
+        # translation_dataset = load_dataset(self.dataset, self.languages)
+        # translation_dataset.set_format(columns='translation')
+
+        # self.train = self.sort_by_len(translation_dataset['train'])
+        # self.valid = self.sort_by_len(translation_dataset['validation'])
+        # self.test  = self.sort_by_len(translation_dataset['test'])
 
         return
 
@@ -142,3 +147,30 @@ class WMT20DataModule(pl.LightningDataModule):
     def val_dataloader(self) -> DataLoader:
         return DataLoader(self.valid, batch_size=self.val_batch_size, collate_fn=self.collate_fn, shuffle=False, num_workers=1)
 
+
+class NewsCommentaryTranslationDataset(torch.utils.data.Dataset):
+    def __init__(self, src_path='.data/SRC_news-commentary-v14.en-ru.tsv', trg_path='.data/TRG_news-commentary-v14.en-ru.tsv'):
+
+        norm_len_indexes = []
+        with open(src_path, 'r') as f:
+            self.src = list(map(lambda x: x.strip(), f.readlines()))
+
+        with open(trg_path, 'r') as f:
+            self.trg = list(map(lambda x: x.strip(), f.readlines()))
+
+        for i, x in enumerate(self.src):
+            if len(x) < 300:
+                norm_len_indexes.append(i)
+
+        print(f"Filtered by len { len(self.src) - len(norm_len_indexes) } sentences. Rest: { len(norm_len_indexes) }")
+
+        self.src = [self.src[i] for i in norm_len_indexes]
+        self.trg = [self.trg[i] for i in norm_len_indexes]
+
+        assert len(self.src) == len(self.trg)
+
+    def __len__(self):
+        return len(self.src)
+
+    def __getitem__(self, i):
+        return { "translation": { "en": self.trg[i], "ru": self.src[i] } }

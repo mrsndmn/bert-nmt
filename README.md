@@ -19,3 +19,6 @@
 * обучаем по словарю
 * scaling up transformers like efficient nets?
 * Recurrent Bert разное количество слоев
+
+Adversarial NMT -- может быть хорошо применено к прогрессивному переводу
+* https://arxiv.org/pdf/1905.11946v5.pdf

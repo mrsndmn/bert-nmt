@@ -5,7 +5,7 @@ from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import BpeTrainer
-
+from wmt_datamodule import NewsCommentaryTranslationDataset
 
 if __name__ == '__main__':
 
@@ -18,8 +18,9 @@ if __name__ == '__main__':
     parser.add_argument('--special-tokens', type=str, default="[UNK],[SEP],[PAD],[MASK],[ECHO],[TRANSLATE]")
     args = parser.parse_args()
 
-    translation_dataset = load_dataset(args.dataset, args.languages)
-    translation_dataset.set_format(columns='translation')
+    # translation_dataset = load_dataset(args.dataset, args.languages)
+    # translation_datase    t.set_format(columns='translation')
+    translation_dataset = NewsCommentaryTranslationDataset()
 
 
     tokenizer_file = args.tokenizer_out
@@ -29,7 +30,7 @@ if __name__ == '__main__':
     tokenizer.pre_tokenizer = Whitespace()
     trainer = BpeTrainer(special_tokens=special_tokens)
 
-    all_translation_sentences = map(lambda x: [ x['translation'][lang] for lang in x['translation'].keys() ], translation_dataset['train'])
+    all_translation_sentences = map(lambda x: [ x['translation'][lang] for lang in x['translation'].keys() ], translation_dataset)
 
     tokenizer.train_from_iterator( all_translation_sentences, trainer=trainer )
 

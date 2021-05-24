@@ -17,3 +17,5 @@ stages:
     - train_tokenizer.py
     outs:
     - lightning_logs/translate_bert_inv_tokens
+
+# ~/bin/knocktg python train_bert.py --name mlm_bert_translate --tokenizer .data/wmt20.bpetokenizer --dataset wmt20_mlqe_task1 --languages ru-en --batch_size 10 --noam_opt_warmup_steps 4000 --gpus 1 --early_stopping_patience 10 --noam_opt_warmup_steps 2000 --track_grad_norm 2 --scheduler no --lr 0.0003 --blm_class BertTranslateLightningModule --gradient_clip_val 0.1 --limit_train_batches 2000

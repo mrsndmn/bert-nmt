@@ -5,12 +5,12 @@ stages:
       wmt20_mlqe_task1 --languages ru-en
     deps:
     - path: train_tokenizer.py
-      md5: ba8acf6440d424120b8cc0972f1e85d8
-      size: 1347
+      md5: 22b178f99b49144a8d01e671edb8a968
+      size: 1466
     outs:
     - path: .data/wmt20.bpetokenizer
-      md5: ead1ef249b71bc5582bae2de9509a790
-      size: 898544
+      md5: 6283b43a10006105fa6d69735b91c78f
+      size: 1030954
   echo_bert_inv_tokens:
     cmd: python train_bert.py --name echo_bert_inv_tokens --tokenizer .data/wmt20.bpetokenizer
       --dataset wmt20_mlqe_task1 --languages ru-en --batch_size 10 --noam_opt_warmup_steps
