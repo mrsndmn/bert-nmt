@@ -127,8 +127,26 @@ https://lena-voita.github.io/posts/source_target_contributions_to_nmt.html
 
 
 
+-----------
 
+Неструктруированые todo
 
+### linformer
+https://github.com/pytorch/fairseq/tree/master/examples/linformer
+https://arxiv.org/pdf/2006.04768.pdf
+
+### wav2vec
+https://github.com/pytorch/fairseq/blob/master/examples/wav2vec/README.md
+https://arxiv.org/abs/2006.11477
+
+### nar
+https://github.com/pytorch/fairseq/blob/master/examples/nonautoregressive_translation/README.md
+
+### Levenshtein Transformer
+https://arxiv.org/pdf/1905.11006.pdf
+
+### UNDERSTANDING KNOWLEDGE DISTILLATION IN NON-AUTOREGRESSIVE MACHINE TRANSLATION
+https://arxiv.org/pdf/1911.02727.pdf
 
 -----------
 
