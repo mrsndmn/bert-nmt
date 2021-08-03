@@ -1,3 +1,5 @@
+# HowtoReadPaper
+https://web.stanford.edu/class/ee384m/Handouts/HowtoReadPaper.pdf
 
 
 #### References:
